@@ -910,11 +910,20 @@
      gpio_set_fsel(gpio, RP1_FSEL_GPIO);
  }
  
- // Configure GPIO as input
- void gpio_set_input(int gpio) {
-     gpio_set_dir(gpio, 1);  // 1 = input
-     gpio_set_fsel(gpio, RP1_FSEL_GPIO);
- }
+// Configure GPIO as input
+void gpio_set_input(int gpio) {
+    volatile uint8_t *pad_reg = gpio_get_pad_reg(gpio);
+    uint32_t pad;
+    
+    // Enable input buffer on pad
+    pad = readl(pad_reg);
+    pad |= RP1_PAD_IN_ENABLE_MASK;      // Enable input
+    pad |= RP1_PAD_OUT_DISABLE_MASK;    // Disable output driver
+    writel(pad, pad_reg);
+    
+    gpio_set_dir(gpio, 1);  // 1 = input (clear OE)
+    gpio_set_fsel(gpio, RP1_FSEL_GPIO);
+}
  
  // Set pull-up/pull-down
  void gpio_set_pull(int gpio, int pull) {

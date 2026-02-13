@@ -353,6 +353,60 @@ void gpio_set_value(int gpio, int value) {
 }
 ```
 
+### Configure GPIO as Input
+
+```c
+void gpio_set_input(int gpio) {
+    volatile uint8_t *gpio_reg = rp1_bar1 + RP1_IO_BANK0_BASE + (gpio * 8);
+    volatile uint8_t *pad_reg = rp1_bar1 + RP1_PADS_BANK0_BASE + 4 + (gpio * 4);
+    volatile uint8_t *rio = rp1_bar1 + RP1_SYS_RIO0_BASE;
+    uint32_t mask = 1 << gpio;
+    
+    // 1. Enable input buffer, disable output driver on pad
+    uint32_t pad = readl(pad_reg);
+    pad |= RP1_PAD_IN_ENABLE_MASK;      // Enable input
+    pad |= RP1_PAD_OUT_DISABLE_MASK;    // Disable output
+    writel(pad, pad_reg);
+    
+    // 2. Set function select to GPIO
+    uint32_t ctrl = readl(gpio_reg + RP1_GPIO_CTRL);
+    ctrl &= ~RP1_GPIO_CTRL_FUNCSEL_MASK;
+    ctrl |= RP1_FSEL_GPIO;
+    writel(ctrl, gpio_reg + RP1_GPIO_CTRL);
+    
+    // 3. Clear output enable (set as input)
+    writel(mask, rio + RP1_RIO_OE + RP1_CLR_OFFSET);
+}
+```
+
+### Read GPIO
+
+```c
+int gpio_get_value(int gpio) {
+    volatile uint8_t *rio = rp1_bar1 + RP1_SYS_RIO0_BASE;
+    uint32_t val = readl(rio + RP1_RIO_IN);
+    return (val >> gpio) & 1;
+}
+```
+
+### Set Pull-up/Pull-down
+
+```c
+#define RP1_PULL_NONE  0
+#define RP1_PULL_DOWN  1
+#define RP1_PULL_UP    2
+
+void gpio_set_pull(int gpio, int pull) {
+    volatile uint8_t *pad_reg = rp1_bar1 + RP1_PADS_BANK0_BASE + 4 + (gpio * 4);
+    uint32_t pad = readl(pad_reg);
+    
+    pad &= ~RP1_PAD_PULL_MASK;          // Clear pull bits
+    pad |= (pull & 0x3) << RP1_PAD_PULL_LSB;
+    
+    writel(pad, pad_reg);
+}
+```
+
 ## Common Issues and Solutions
 
 ### Issue: Config space reads return 0xFFFFFFFF
