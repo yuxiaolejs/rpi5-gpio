@@ -22,6 +22,11 @@ aarch64-none-elf-objcopy \
 
 aarch64-none-elf-objdump -D kernel8.elf
 
+sudo mount /dev/sda1 mnt
+sudo cp kernel8.img mnt/
+sync
+sudo umount mnt
+
 # cp kernel8.img /media/${USER}/bootfs/
 # cp config.txt /media/${USER}/bootfs/
 

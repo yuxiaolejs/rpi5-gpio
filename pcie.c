@@ -857,14 +857,19 @@
      ctrl &= ~RP1_GPIO_CTRL_FUNCSEL_MASK;
      ctrl |= (fsel & RP1_GPIO_CTRL_FUNCSEL_MASK);
      
-     if (fsel == RP1_FSEL_GPIO || fsel < RP1_FSEL_NONE) {
-         // Set OEOVER to ENABLE (force output enable on)
-         ctrl &= ~RP1_GPIO_CTRL_OEOVER_MASK;
-         ctrl |= (RP1_OEOVER_ENABLE << RP1_GPIO_CTRL_OEOVER_LSB);
-         // Set OUTOVER to PERI (let RIO control output value)
-         ctrl &= ~RP1_GPIO_CTRL_OUTOVER_MASK;
-         ctrl |= (RP1_OUTOVER_PERI << RP1_GPIO_CTRL_OUTOVER_LSB);
-     }
+     if (fsel == RP1_FSEL_GPIO) {
+        // GPIO mode: force output enable on, let RIO control value
+        ctrl &= ~RP1_GPIO_CTRL_OEOVER_MASK;
+        ctrl |= (RP1_OEOVER_ENABLE << RP1_GPIO_CTRL_OEOVER_LSB);
+        ctrl &= ~RP1_GPIO_CTRL_OUTOVER_MASK;
+        ctrl |= (RP1_OUTOVER_PERI << RP1_GPIO_CTRL_OUTOVER_LSB);
+    } else if (fsel < RP1_FSEL_NONE) {
+        // Peripheral mode: let the peripheral control output enable
+        ctrl &= ~RP1_GPIO_CTRL_OEOVER_MASK;
+        // OEOVER = 0 (PERI) — peripheral decides if pin is output or input
+        ctrl &= ~RP1_GPIO_CTRL_OUTOVER_MASK;
+        // OUTOVER = 0 (PERI) — peripheral drives output value
+    }
      
      writel(ctrl, pin_reg + RP1_GPIO_CTRL);
  }
@@ -952,6 +957,96 @@ void gpio_set_input(int gpio) {
  // Define which GPIO to toggle (0-27 for header pins)
  // GPIO 4 = Pin 7 on the 40-pin header (commonly used)
  #define TEST_GPIO   4
+
+
+ #define RP1_UART0_BASE  (PCIE_OUTBOUND_BASE + 0x30000)
+
+ // PL011 register offsets
+#define UART_DR     0x000
+#define UART_FR     0x018
+#define UART_IBRD   0x024
+#define UART_FBRD   0x028
+#define UART_LCRH   0x02C
+#define UART_CR     0x030
+#define UART_IFLS   0x034
+#define UART_IMSC   0x038
+#define UART_ICR    0x044
+
+// FR bits
+#define FR_TXFF     (1 << 5)
+#define FR_RXFE     (1 << 4)
+#define FR_BUSY     (1 << 3)
+
+// LCRH bits
+#define LCRH_WLEN8  (3 << 5)
+#define LCRH_FEN    (1 << 4)
+
+// CR bits
+#define CR_UARTEN   (1 << 0)
+#define CR_TXE      (1 << 8)
+#define CR_RXE      (1 << 9)
+
+void pl011_init(uint64_t base, uint32_t uartclk, uint32_t baud) {
+    volatile uint32_t *uart = (volatile uint32_t *)base;
+
+    // 1. Disable UART
+    uart[UART_CR / 4] = 0;
+
+    // 2. Wait for any TX in progress
+    while (uart[UART_FR / 4] & FR_BUSY);
+
+    // 3. Flush FIFOs (disable FEN)
+    uart[UART_LCRH / 4] = 0;
+
+    // 4. Clear all interrupts
+    uart[UART_ICR / 4] = 0x7FF;
+
+    // 5. Mask all interrupts (we're polling)
+    uart[UART_IMSC / 4] = 0;
+
+    // 6. Set baud rate
+    //    Linux formula: divisor = (uartclk * 4) / baud
+    //    IBRD = divisor >> 6,  FBRD = divisor & 0x3F
+    //    For 48MHz / 115200: divisor = 1667, IBRD = 26, FBRD = 3
+    uint32_t divisor = (uartclk * 4) / baud;
+    uart[UART_IBRD / 4] = divisor >> 6;
+    uart[UART_FBRD / 4] = divisor & 0x3F;
+
+    // 7. Set 8N1 + enable FIFOs
+    uart[UART_LCRH / 4] = LCRH_WLEN8 | LCRH_FEN;
+
+    // 8. Enable UART, TX, RX
+    uart[UART_CR / 4] = CR_UARTEN | CR_TXE | CR_RXE;
+}
+
+void pl011_putc(uint64_t base, char c) {
+    volatile uint32_t *uart = (volatile uint32_t *)base;
+    
+    // Wait until TX FIFO is not full
+    while (uart[UART_FR / 4] & FR_TXFF);
+    
+    // Write the character
+    uart[UART_DR / 4] = c;
+}
+
+void pl011_puts(uint64_t base, const char *s) {
+    while (*s) {
+        if (*s == '\n')
+            pl011_putc(base, '\r');  // serial terminals usually want \r\n
+        pl011_putc(base, *s++);
+    }
+}
+
+
+char pl011_getc(uint64_t base) {
+    volatile uint32_t *uart = (volatile uint32_t *)base;
+    
+    // Wait until RX FIFO is not empty
+    while (uart[UART_FR / 4] & FR_RXFE);
+    
+    // Read the character
+    return uart[UART_DR / 4] & 0xFF;
+}
  
  void main(void) {
      int ret;
@@ -995,13 +1090,33 @@ void gpio_set_input(int gpio) {
     uart_puts("Blinking GPIO");
     uart_puthex(TEST_GPIO);
     uart_puts("...\r\n");
-    
-    while (1) {
+
+    gpio_set_fsel(14, 4);  // GPIO14 = UART0_TX
+    gpio_set_fsel(15, 4);  // GPIO15 = UART0_RX
+
+    pl011_init(RP1_UART0_BASE, 48000000, 115200);
+
+    int fuck = 12;
+
+    while(fuck--){
         gpio_set_value(TEST_GPIO, 1);
         early_delay(DELAY_LONG);
+
+        pl011_putc(RP1_UART0_BASE, 'H');
+        pl011_putc(RP1_UART0_BASE, 'i');
+        pl011_putc(RP1_UART0_BASE, '\r');
+        pl011_putc(RP1_UART0_BASE, '\n');
         
         gpio_set_value(TEST_GPIO, 0);
         early_delay(DELAY_LONG);
     }
+
+    while(1){
+        char c = pl011_getc(RP1_UART0_BASE);
+        gpio_set_value(TEST_GPIO, 1);
+        pl011_putc(RP1_UART0_BASE, c);
+        gpio_set_value(TEST_GPIO, 0);
+    }
+
 }
  
